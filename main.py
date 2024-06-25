@@ -1,4 +1,4 @@
-from regression import Regressor
+from models import Regressor
 import matplotlib.pyplot as plt
 import trajplot
 import kinematics
