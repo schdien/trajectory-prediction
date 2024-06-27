@@ -43,7 +43,7 @@ class TrajPredictor:
             mean.append(mean_p)
         return np.row_stack(mean)
 
-    def _query_trajectory(self,x,step=-1,k=100):
+    def _query_trajectory(self,x,step=-1,k=200):
         if len(x) != 1:
             raise ValueError('the length of x must be 1.')
         x = self.normalizer.transform(x)
@@ -59,22 +59,20 @@ class TrajPredictor:
         else: 
             end_ind = self._get_pred_index(ind,step,'edge')
         slice_ind = np.hstack([np.arange(s, e) for s, e in zip((ind + 1).T, end_ind.T)])
-        pred_trajs = self.trajs.take(slice_ind)
-        return pred_trajs, dist
+        pred_trajs = self.trajs.take(slice_ind,axis=0)
+        pred_traj_ids = self.identifiers.take(slice_ind)
+        return pred_traj_ids, pred_trajs, dist
 
     
-    def _clusetr_trajectory(self,trajs):
-        ref_traj = max(trajs,key=len)
-        time_index = [dtw(ref_traj,traj,step_pattern='asymmetric').index2 for traj in trajs] 
+    def _cluster_trajectory(self,trajs):
+        trajs= self.normalizer.transform(trajs)
+        cluster = DBSCAN(eps=0.02,min_samples=10)
+        cluster.fit(trajs)
+        return cluster.labels_
 
     def predict_trajectory(self,x,step=-1):
-        pred_trajs, W = self._query_trajectory(x,step)
-        max_len = len(max(pred_trajs, key=len))
-        #填充trajs用于聚类
-        padded_pred_trajs = -1*np.ones((len(pred_trajs),len(max(pred_trajs, key=len)),pred_trajs[0].shape[-1]))
-        for i,pred_traj in enumerate(pred_trajs):
-            padded_pred_trajs[i,:len(pred_traj)] = pred_traj
-        labels = self._cluster_trajectory(padded_pred_trajs)
+        pred_traj_ids,pred_trajs, d = self._query_trajectory(x,step)
+        labels = self._cluster_trajectory(pred_trajs)
         return pred_trajs,labels
 
 
@@ -87,6 +85,5 @@ if __name__=='__main__':
     #test_data = traj_list[0][98:100]
     predictor = TrajPredictor(traj_list)
     trajs,labels = predictor.predict_trajectory(test_data,step=-1)
-    subplot = plt.subplot()
     colors = trajplot.label2color(labels)
-    trajplot.plot2d(trajs,colors)
+    trajplot.scatter2d(trajs,colors)

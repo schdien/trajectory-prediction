@@ -4,8 +4,16 @@ import numpy as np
 
 def label2color(labels):
     color_map = {-1:'k',0:'#1f77b4',1: '#ff7f0e',2: '#2ca02c',3: '#d62728',4: '#9467bd',
-                5: '#8c564b',6: '#e377c2',7: '#7f7f7f', 8:'#bcbd22',9: '#17becf'}
+                5: '#8c564b',6: '#e377c2',7: '#7f7f7f', 8:'#bcbd22',9: '#17becf',
+                10: '#172965',11: '#12b5cf',12:'k',13:'#1f77b4',14: '#ff7f0e',15: '#2ca02c',16: '#d62728',17: '#9467bd',
+                18: '#8c564b',19: '#e377c2',20: '#7f7f7f', 21:'#bcbd22',22: '#17becf',
+                23: '#172965',24: '#12b5cf'}
     return [color_map[label] for label in labels]
+
+def scatter2d(points,colors=None):
+    subplot = plt.subplot()
+    subplot.scatter(points[:, 0], points[:, 1],c=colors)
+    plt.show()
 
 def plot2d(trajs,colors=None):
     subplot = plt.subplot()
@@ -16,7 +24,6 @@ def plot2d(trajs,colors=None):
         for traj,color in zip(trajs,colors):
             subplot.plot(traj[:, 0], traj[:, 1],marker='.',c=color)
     plt.show()
-
 
 def plot3d(trajs):
     subplot = plt.subplot(projection='3d')
