@@ -108,12 +108,19 @@ class TrajPredictor:
         cluster.fit(trajs.reshape((trajs.shape[0],-1)))
         return cluster.labels_
     
-    def _clusetr_trajectory2(self,trajs):
-        ref_traj = max(trajs,key=len)
-        time_index = [dtw(ref_traj,traj,step_pattern='asymmetric').index2 for traj in trajs] 
+    def _cluster_trajectory2(self,trajs):
+        ref_traj = trajs[0][:,:2]
+        #这一步计算不考虑速度
+        time_inds = np.array([dtw(ref_traj,traj[:,:2],step_pattern='asymmetric',open_begin=True,open_end=True).index2 for traj in trajs])
+        samples = np.array([traj[time_ind] for traj,time_ind in zip(trajs,time_inds)])#这一步需要速度
+        samples = self.normalizer(samples.swapaxes(0,1))
+        cluster = DBSCAN(eps=0.1,min_samples=2)
+        labels = np.array([cluster.fit(sample).labels_ for sample in samples])
+        print(1)
 
     def predict_trajectory(self,x,step=-1):
         pred_trajs, W = self._query_trajectory(x,step)
+        labels = self._cluster_trajectory2(pred_trajs)
         max_len = len(max(pred_trajs, key=len))
         #填充trajs用于聚类
         padded_pred_trajs = -1*np.ones((len(pred_trajs),len(max(pred_trajs, key=len)),pred_trajs[0].shape[-1]))
