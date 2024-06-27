@@ -4,12 +4,18 @@ import time
 
 
 class TrajDownloader:
-    def __init__(self, start, end, anums, n_days=180):
+    def __init__(self, start, end, anums, n_days=180, save_path=r"assets"):
         self.start = start
         self.end = end
         self.anums = anums
         self.n_days = n_days
-        self.driver = webdriver.Edge()
+        option = webdriver.ChromeOptions()
+        prefs = {
+	        'download.default_directory': save_path,  # 设置默认下载路径
+	        "profile.default_content_setting_values.automatic_downloads": 1  # 允许多文件下载
+        }
+        option.add_experimental_option("prefs", prefs)
+        self.driver = webdriver.Edge(edge_options=option)
         self.today_time = int(time.mktime(time.strptime(str(datetime.date.today()), '%Y-%m-%d')))
 
     def download(self):
