@@ -132,7 +132,8 @@ if __name__=='__main__':
     test_data = np.array([traj_list[0][100]])
     #test_data = traj_list[0][98:100]
     predictor = TrajPredictor(traj_list)
-    trajs,labels = predictor.predict_trajectory(test_data,step=-1)
+    truth = traj_list[0][50:200]
+    trajs,labels = predictor.predict_trajectory(test_data,step=100)
     subplot = plt.subplot()
     colors = trajplot.label2color(labels)
-    trajplot.plot2d(trajs,colors)
+    trajplot.plot2d(trajs+[truth],colors+['y'])
