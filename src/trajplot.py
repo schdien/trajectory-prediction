@@ -7,6 +7,20 @@ def label2color(labels):
                 5: '#8c564b',6: '#e377c2',7: '#7f7f7f', 8:'#bcbd22',9: '#17becf'}
     return [color_map[label] for label in labels]
 
+
+def scatter2d(points,colors=None):
+    subplot = plt.subplot()
+    for point,color in zip(points,colors):
+        subplot.scatter(point[:, 0], point[:, 1],c=color)
+    plt.show()
+
+def scatter2d2(points,colors=None):
+    subplot = plt.subplot()
+    subplot.scatter(points[:, 0], points[:, 1],c=colors)
+    plt.show()
+
+
+
 def plot2d(trajs,colors=None):
     subplot = plt.subplot()
     if colors is None:

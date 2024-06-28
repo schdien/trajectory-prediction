@@ -3,6 +3,7 @@ from sklearn.neighbors import BallTree
 from sklearn.cluster import DBSCAN
 from sklearn.preprocessing import MinMaxScaler
 from dtw import dtw
+from modefilter import mode_filter
 import matplotlib.pyplot as plt
 
 
@@ -113,14 +114,23 @@ class TrajPredictor:
         #这一步计算不考虑速度
         time_inds = np.array([dtw(ref_traj,traj[:,:2],step_pattern='asymmetric',open_begin=True,open_end=True).index2 for traj in trajs])
         samples = np.array([traj[time_ind] for traj,time_ind in zip(trajs,time_inds)])#这一步需要速度
-        samples = self.normalizer(samples.swapaxes(0,1))
-        cluster = DBSCAN(eps=0.1,min_samples=2)
+        samples = [self.normalizer.transform(sample) for sample in samples.swapaxes(0,1)]
+        def metric(x,y):
+            p_dist = np.linalg.norm(x[:2]-y[:2])
+            v_dist = np.linalg.norm(x[2:]-y[2:])
+            return max(p_dist,0.11*v_dist)
+        cluster = DBSCAN(eps=0.002,min_samples=2,metric=metric)
+
         labels = np.array([cluster.fit(sample).labels_ for sample in samples])
-        print(1)
+        #统计滤波器去噪
+        labels = np.array([mode_filter(label,10) for label in labels.T]).T
+        return samples,labels
 
     def predict_trajectory(self,x,step=-1):
         pred_trajs, W = self._query_trajectory(x,step)
-        labels = self._cluster_trajectory2(pred_trajs)
+        samples,labels = self._cluster_trajectory2(pred_trajs)
+        return samples,labels
+        '''
         max_len = len(max(pred_trajs, key=len))
         #填充trajs用于聚类
         padded_pred_trajs = -1*np.ones((len(pred_trajs),len(max(pred_trajs, key=len)),pred_trajs[0].shape[-1]))
@@ -128,6 +138,7 @@ class TrajPredictor:
             padded_pred_trajs[i,:len(pred_traj)] = pred_traj
         labels = self._cluster_trajectory(padded_pred_trajs)
         return pred_trajs,labels
+        '''
 
 
 
@@ -140,7 +151,8 @@ if __name__=='__main__':
     #test_data = traj_list[0][98:100]
     predictor = TrajPredictor(traj_list)
     truth = traj_list[0][50:200]
-    trajs,labels = predictor.predict_trajectory(test_data,step=100)
-    subplot = plt.subplot()
-    colors = trajplot.label2color(labels)
-    trajplot.plot2d(trajs+[truth],colors+['y'])
+    trajs,labels = predictor.predict_trajectory(test_data,step=250)
+    colors = [trajplot.label2color(label) for label in labels]
+    #trajplot.plot2d(trajs+[truth],colors+['y'])
+    #trajplot.scatter2d2(trajs[80],colors[80])
+    trajplot.scatter2d(trajs,colors)

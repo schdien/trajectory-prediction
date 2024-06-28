@@ -4,7 +4,7 @@ import matplotlib.pyplot as plt
 import data
 raw_trajs = data.load_files(r"assets/PEK-SHA", usecols=[7, 8, 5],num=3)
 traj_list = [data.preprocess2(raw_traj) for raw_traj in raw_trajs]
-traj0 = traj_list[0][:,:2]
+traj0 = traj_list[0][:300,:2]
 traj1 = traj_list[1][:,:2]
 ## A noisy sine wave as query
 idx = np.linspace(0,6.28,num=100)
@@ -15,7 +15,7 @@ template = np.cos(idx)
 
 ## Find the best match with the canonical recursion formula
 
-alignment = dtw(traj1, traj0, step_pattern='asymmetric')
+alignment = dtw(traj1, traj0,keep_internals=True, step_pattern='asymmetric')
 
 ## Display the warping curve, i.e. the alignment curve
 alignment.plot(type="threeway")
