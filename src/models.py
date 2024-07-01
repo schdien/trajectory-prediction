@@ -1,6 +1,6 @@
 import numpy as np
 from sklearn.neighbors import BallTree
-from sklearn.cluster import DBSCAN
+from sklearn.cluster import DBSCAN,HDBSCAN,OPTICS
 from sklearn.preprocessing import MinMaxScaler
 from dtw import dtw
 from modefilter import mode_filter
@@ -8,32 +8,13 @@ import matplotlib.pyplot as plt
 
 
 class TrajPredictor:
-    def __init__(self,traj_list):
-        self.trajs = np.row_stack(traj_list)
-        self.identifiers = np.concatenate([i * np.ones(len(traj),dtype=int) for i,traj in enumerate(traj_list)])
-        self.edges = np.cumsum(np.array([len(traj) for traj in traj_list]))
+    def __init__(self,trajs):
+        self.trajs = trajs
+        self.ends = np.cumsum(np.array([len(traj) for traj in trajs]))
+        self.starts = np.concatenate((np.array([0]),self.ends[:-1]),axis=0)
         self.normalizer = MinMaxScaler()
-        normalized_trajs = self.normalizer.fit_transform(self.trajs)
+        normalized_trajs = self.normalizer.fit_transform(np.vstack(trajs))
         self.tree = BallTree(normalized_trajs)
-
-
-    def _get_edge_index(self,ind):
-        identifier = self.identifiers[ind]
-        return self.edges[identifier]
-
-    def _get_pred_index(self,ind,step,policy):
-        pred_ind = ind + step
-        curr_id = self.identifiers[ind]
-        pred_id = self.identifiers[pred_ind]
-        if policy == 'remove':
-            return pred_ind[np.where(curr_id==pred_id)]
-        elif policy == 'edge':
-            mismatch = curr_id!=pred_id
-            mismatch_id = curr_id[mismatch]
-            pred_ind[mismatch] = self.edges[mismatch_id]
-            return pred_ind
-        else:
-            raise ValueError('policy must be \'remove\' or \'edge\'')
 
     def _query_point(self,x,step,k=100):
         x = self.normalizer.transform(x)
@@ -80,23 +61,21 @@ class TrajPredictor:
             mean.append(mean_p)
         return np.row_stack(mean)
 
-    def _query_trajectory(self,x,step=-1,k=100):
+    def _query_trajectory(self,x,step=-1,k=70):
         if len(x) != 1:
             raise ValueError('the length of x must be 1.')
         x = self.normalizer.transform(x)
         dist,ind = self.tree.query(x,k=k)
+        traj_ind = np.searchsorted(self.ends,ind)
+        ind = ind - self.starts[traj_ind]
         #去除重复轨迹的索引
-        traj_ind = self.identifiers[ind]
-        _, unique_ind = np.unique(traj_ind, return_index=True)
-        dist = dist[:,unique_ind]
-        ind = ind[:,unique_ind]
+        traj_inds,t = np.unique(traj_ind,return_index=True)
+        inds = ind.take(t)
         #根据索引取多个相似轨迹
         if step == -1: #预测到结束点
-            end_ind = self._get_edge_index(ind)
-        else: 
-            end_ind = self._get_pred_index(ind,step,'edge')
-        slice_ind = [np.arange(s, e) for s, e in zip((ind + 1).T, end_ind.T)]
-        pred_trajs = [self.trajs[i] for i in slice_ind]
+            pred_trajs = [self.trajs[traj_ind][ind:] for traj_ind,ind in zip(traj_inds,inds)]
+        else:
+            pred_trajs = [self.trajs[traj_ind][ind:ind+step] for traj_ind,ind in zip(traj_inds,inds)]
         return pred_trajs, dist
 
     def _cluster_trajectory(self,trajs):
@@ -110,20 +89,30 @@ class TrajPredictor:
         return cluster.labels_
     
     def _cluster_trajectory2(self,trajs):
+        trajs = np.array(trajs)
         ref_traj = trajs[0][:,:2]
         #这一步计算不考虑速度
         time_inds = np.array([dtw(ref_traj,traj[:,:2],step_pattern='asymmetric',open_begin=True,open_end=True).index2 for traj in trajs])
-        samples = np.array([traj[time_ind] for traj,time_ind in zip(trajs,time_inds)])#这一步需要速度
-        samples = [self.normalizer.transform(sample) for sample in samples.swapaxes(0,1)]
+        #samples = [traj[time_ind[(time_ind!=0)&(time_ind!=len(ref_traj)-1)]] for traj,time_ind in zip(trajs,time_inds)]#这一步需要速度
+        samples = []
+        for traj,time_ind in zip(trajs,time_inds):
+            traj = traj[time_ind]
+            traj[(time_ind==0)|(time_ind==len(ref_traj)-1)] = -1
+            samples.append(traj)
+        samples = np.array(samples)
+        samples = [self.normalizer.transform(sample[sample!=-1].reshape(-1,4)) for sample in samples.swapaxes(0,1)]
+        #samples = [trajs[time_inds==i] for i in range(len(ref_traj))]
+        
         def metric(x,y):
             p_dist = np.linalg.norm(x[:2]-y[:2])
+            #v_dist = np.cross(x[2:],y[2:])/(np.linalg.norm(y[2:])*np.linalg.norm(x[2:]))
             v_dist = np.linalg.norm(x[2:]-y[2:])
-            return max(p_dist,0.11*v_dist)
-        cluster = DBSCAN(eps=0.002,min_samples=2,metric=metric)
-
-        labels = np.array([cluster.fit(sample).labels_ for sample in samples])
+            return max(p_dist,0.1*v_dist)
+        cluster = DBSCAN(eps=0.003,min_samples=2,metric=metric)
+        #cluster = HDBSCAN(min_cluster_size=4,allow_single_cluster=True,metric=metric)
+        labels = [cluster.fit(sample).labels_ for sample in samples]
         #统计滤波器去噪
-        labels = np.array([mode_filter(label,10) for label in labels.T]).T
+        #labels = np.array([mode_filter(label,12) for label in labels.T]).T
         return samples,labels
 
     def predict_trajectory(self,x,step=-1):
@@ -154,5 +143,5 @@ if __name__=='__main__':
     trajs,labels = predictor.predict_trajectory(test_data,step=250)
     colors = [trajplot.label2color(label) for label in labels]
     #trajplot.plot2d(trajs+[truth],colors+['y'])
-    #trajplot.scatter2d2(trajs[80],colors[80])
+    #trajplot.scatter2d2(trajs[-2],colors[-2])
     trajplot.scatter2d(trajs,colors)

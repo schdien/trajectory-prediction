@@ -4,8 +4,10 @@ import matplotlib.pyplot as plt
 import data
 raw_trajs = data.load_files(r"assets/PEK-SHA", usecols=[7, 8, 5],num=3)
 traj_list = [data.preprocess2(raw_traj) for raw_traj in raw_trajs]
-traj0 = traj_list[0][:300,:2]
-traj1 = traj_list[1][:,:2]
+traj0 = traj_list[0][:30,1]
+traj1 = traj_list[1][:50,1]
+a = np.array([0,1,2,2.7,3,3.2,4,5,6,7,8,9,10,11,12,13,14,14.2,15,16,17,18,19,20])
+b = np.arange(3.2,16.2)
 ## A noisy sine wave as query
 idx = np.linspace(0,6.28,num=100)
 query = np.sin(idx) + np.random.uniform(size=100)/10.0
@@ -15,10 +17,10 @@ template = np.cos(idx)
 
 ## Find the best match with the canonical recursion formula
 
-alignment = dtw(traj1, traj0,keep_internals=True, step_pattern='asymmetric')
+alignment = dtw(traj0, traj1,keep_internals=True, step_pattern='asymmetric',open_begin=True,open_end=True)
 
 ## Display the warping curve, i.e. the alignment curve
-alignment.plot(type="threeway")
+alignment.plot(type="twoway",marker='.')
 
 ## Align and plot with the Rabiner-Juang type VI-c unsmoothed recursion
 #dtw(query, template, keep_internals=True,
