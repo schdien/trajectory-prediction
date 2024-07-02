@@ -9,11 +9,11 @@ import matplotlib.pyplot as plt
 
 class TrajPredictor:
     def __init__(self,trajs):
-        self.trajs = trajs
-        self.ends = np.cumsum(np.array([len(traj) for traj in trajs]))
-        self.starts = np.concatenate((np.array([0]),self.ends[:-1]),axis=0)
+        self.trajs = np.vstack(trajs)
+        lengths = np.array([len(traj) for traj in trajs])
+        self.ends = np.repeat(np.cumsum(lengths)-1,lengths)
         self.normalizer = MinMaxScaler()
-        normalized_trajs = self.normalizer.fit_transform(np.vstack(trajs))
+        normalized_trajs = self.normalizer.fit_transform(self.trajs)
         self.tree = BallTree(normalized_trajs)
 
     def _query_point(self,x,step,k=100):
@@ -65,17 +65,16 @@ class TrajPredictor:
         if len(x) != 1:
             raise ValueError('the length of x must be 1.')
         x = self.normalizer.transform(x)
-        dist,ind = self.tree.query(x,k=k)
-        traj_ind = np.searchsorted(self.ends,ind)
-        ind = ind - self.starts[traj_ind]
+        dist,inds = self.tree.query(x,k=k)
+        ends = self.ends[inds]
         #去除重复轨迹的索引
-        traj_inds,t = np.unique(traj_ind,return_index=True)
-        inds = ind.take(t)
+        ends,uniq = np.unique(ends,return_index=True)
+        inds = inds.take(uniq)
         #根据索引取多个相似轨迹
-        if step == -1: #预测到结束点
-            pred_trajs = [self.trajs[traj_ind][ind:] for traj_ind,ind in zip(traj_inds,inds)]
+        if step == -1:
+            pred_trajs = [self.trajs[ind:end] for ind,end in zip(inds,ends)]
         else:
-            pred_trajs = [self.trajs[traj_ind][ind:ind+step] for traj_ind,ind in zip(traj_inds,inds)]
+            pred_trajs = [self.trajs[ind:min(ind+step,end)] for ind,end in zip(inds,ends)]
         return pred_trajs, dist
 
     def _cluster_trajectory(self,trajs):
@@ -89,45 +88,27 @@ class TrajPredictor:
         return cluster.labels_
     
     def _cluster_trajectory2(self,trajs):
-        trajs = np.array(trajs)
+        #trajs = np.array(trajs)
         ref_traj = trajs[0][:,:2]
         #这一步计算不考虑速度
         time_inds = np.array([dtw(ref_traj,traj[:,:2],step_pattern='asymmetric',open_begin=True,open_end=True).index2 for traj in trajs])
-        #samples = [traj[time_ind[(time_ind!=0)&(time_ind!=len(ref_traj)-1)]] for traj,time_ind in zip(trajs,time_inds)]#这一步需要速度
-        samples = []
-        for traj,time_ind in zip(trajs,time_inds):
-            traj = traj[time_ind]
-            traj[(time_ind==0)|(time_ind==len(ref_traj)-1)] = -1
-            samples.append(traj)
-        samples = np.array(samples)
-        samples = [self.normalizer.transform(sample[sample!=-1].reshape(-1,4)) for sample in samples.swapaxes(0,1)]
-        #samples = [trajs[time_inds==i] for i in range(len(ref_traj))]
-        
+        samples = np.array([traj[time_ind] for traj,time_ind in zip(trajs,time_inds)])
+        samples = [self.normalizer.transform(sample) for sample in samples.swapaxes(0,1)]
         def metric(x,y):
             p_dist = np.linalg.norm(x[:2]-y[:2])
-            #v_dist = np.cross(x[2:],y[2:])/(np.linalg.norm(y[2:])*np.linalg.norm(x[2:]))
             v_dist = np.linalg.norm(x[2:]-y[2:])
             return max(p_dist,0.1*v_dist)
         cluster = DBSCAN(eps=0.003,min_samples=2,metric=metric)
-        #cluster = HDBSCAN(min_cluster_size=4,allow_single_cluster=True,metric=metric)
-        labels = [cluster.fit(sample).labels_ for sample in samples]
+        labels = np.array([cluster.fit(sample).labels_ for sample in samples])
         #统计滤波器去噪
-        #labels = np.array([mode_filter(label,12) for label in labels.T]).T
+        labels = np.array([mode_filter(label,20) for label in labels.T]).T
         return samples,labels
 
     def predict_trajectory(self,x,step=-1):
         pred_trajs, W = self._query_trajectory(x,step)
         samples,labels = self._cluster_trajectory2(pred_trajs)
         return samples,labels
-        '''
-        max_len = len(max(pred_trajs, key=len))
-        #填充trajs用于聚类
-        padded_pred_trajs = -1*np.ones((len(pred_trajs),len(max(pred_trajs, key=len)),pred_trajs[0].shape[-1]))
-        for i,pred_traj in enumerate(pred_trajs):
-            padded_pred_trajs[i,:len(pred_traj)] = pred_traj
-        labels = self._cluster_trajectory(padded_pred_trajs)
-        return pred_trajs,labels
-        '''
+
 
 
 
