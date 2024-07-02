@@ -1,6 +1,6 @@
 import numpy as np
 from sklearn.neighbors import BallTree
-from sklearn.cluster import DBSCAN,HDBSCAN,OPTICS
+from sklearn.cluster import DBSCAN,HDBSCAN
 from sklearn.preprocessing import MinMaxScaler
 from dtw import dtw
 from modefilter import mode_filter
@@ -16,7 +16,7 @@ class TrajPredictor:
         normalized_trajs = self.normalizer.fit_transform(self.trajs)
         self.tree = BallTree(normalized_trajs)
 
-    def _query_point(self,x,step,k=100):
+    def _query_state(self,x,step,k=100):
         x = self.normalizer.transform(x)
         dist,ind = self.tree.query(x,k=k)
         weights = np.exp(-(dist/0.003)**2/2)
@@ -25,7 +25,7 @@ class TrajPredictor:
         pred_points = self.trajs[pred_ind]
         return pred_points, weights
     
-    def _cluster_point(self,points,weight,eps,min_smaples):
+    def _cluster_state(self,points,weight,eps,min_smaples):
         cluster = DBSCAN(eps=eps, min_samples=min_smaples)
         cluster.fit(points,sample_weight=weight)
         label = cluster.labels_
@@ -70,30 +70,26 @@ class TrajPredictor:
         #去除重复轨迹的索引
         ends,uniq = np.unique(ends,return_index=True)
         inds = inds.take(uniq)
+        dist = dist.take(uniq)
         #根据索引取多个相似轨迹
         if step == -1:
             pred_trajs = [self.trajs[ind:end] for ind,end in zip(inds,ends)]
         else:
             pred_trajs = [self.trajs[ind:min(ind+step,end)] for ind,end in zip(inds,ends)]
-        return pred_trajs, dist
 
-    def _cluster_trajectory(self,trajs):
-        def dtw_distance(x,y):
-            x = x[x!=-1].reshape((-1,2))
-            y = y[y!=-1].reshape((-1,2))
-            return dtw(x,y).distance
-        trajs = trajs[:,:,:2]
-        cluster = DBSCAN(eps=10,min_samples=2,metric=dtw_distance)
-        cluster.fit(trajs.reshape((trajs.shape[0],-1)))
-        return cluster.labels_
+        weights = np.exp(-(dist/0.003)**2/2)
+        weights = weights / np.max(weights)
+
+        return pred_trajs, weights
+
     
-    def _cluster_trajectory2(self,trajs):
+    def _cluster_trajectory(self,trajs):
         #trajs = np.array(trajs)
         ref_traj = trajs[0][:,:2]
         #这一步计算不考虑速度
         time_inds = np.array([dtw(ref_traj,traj[:,:2],step_pattern='asymmetric',open_begin=True,open_end=True).index2 for traj in trajs])
         samples = np.array([traj[time_ind] for traj,time_ind in zip(trajs,time_inds)])
-        samples = [self.normalizer.transform(sample) for sample in samples.swapaxes(0,1)]
+        samples = np.array([self.normalizer.transform(sample) for sample in samples.swapaxes(0,1)])
         def metric(x,y):
             p_dist = np.linalg.norm(x[:2]-y[:2])
             v_dist = np.linalg.norm(x[2:]-y[2:])
@@ -102,27 +98,62 @@ class TrajPredictor:
         labels = np.array([cluster.fit(sample).labels_ for sample in samples])
         #统计滤波器去噪
         labels = np.array([mode_filter(label,20) for label in labels.T]).T
-        return samples,labels
+        return np.array([self.normalizer.inverse_transform(sample) for sample in samples]),labels
 
-    def predict_trajectory(self,x,step=-1):
-        pred_trajs, W = self._query_trajectory(x,step)
-        samples,labels = self._cluster_trajectory2(pred_trajs)
-        return samples,labels
+    def predict_trajectory(self,x,step=-1,debug=False):
+        pred_trajs, weights = self._query_trajectory(x,step)
+        samples,labels = self._cluster_trajectory(pred_trajs)
 
+        means = []
+        prev_kinds = None
+        for sample,label in zip(samples,labels):
+            kinds = np.unique(label)
+            valid_kinds = kinds[kinds!=-1]
+            if len(valid_kinds)!=0:
+                kinds = valid_kinds
+            cluster_ps = [sample[label == kind] for kind in kinds]
+            cluster_ws = [weights[label == kind] for kind in kinds]
+            weights_sum = np.array([np.sum(w) for w in cluster_ws])
+            mean = np.array([np.sum(s.T * w, axis=1) / p for s, w, p in zip(cluster_ps, cluster_ws, weights_sum)])
+            prob = weights_sum / np.sum(weights_sum)
+            if (kinds != prev_kinds).any():
+                means.append([])
+            means[-1].append(np.column_stack([kinds,prob,mean]))
+            prev_kinds = kinds
+        means = [np.stack(mean,axis=1) for mean in means]
 
-
-
+        if debug:
+            return samples,labels
+        return means
+        
+        
 if __name__=='__main__':
     import data
-    import trajplot
+
+    #读取和预处理数据
     raw_trajs = data.load_files(r"assets/PEK-SHA", usecols=[7, 8, 5],num=3000)
     traj_list = [data.preprocess2(raw_traj) for raw_traj in raw_trajs]
-    test_data = np.array([traj_list[0][100]])
-    #test_data = traj_list[0][98:100]
+    truth = traj_list[0][:350]
+    start_state = np.array([truth[100]])
+
+    #预测
     predictor = TrajPredictor(traj_list)
-    truth = traj_list[0][50:200]
-    trajs,labels = predictor.predict_trajectory(test_data,step=250)
+    pred_traj = predictor.predict_trajectory(start_state,step=250)
+
+    #画图
+    subplot = plt.subplot()
+    subplot.plot(truth[:,0],truth[:,1],marker='.')
+    for stage in pred_traj:
+        for traj in stage:
+            subplot.plot(traj[:, 2], traj[:, 3],marker='.')
+    plt.show()
+
+    #debug
+    '''
+    import trajplot
     colors = [trajplot.label2color(label) for label in labels]
-    #trajplot.plot2d(trajs+[truth],colors+['y'])
-    #trajplot.scatter2d2(trajs[-2],colors[-2])
+    trajplot.plot2d(trajs+[truth],colors+['y'])
+    trajplot.scatter2d2(trajs[-2],colors[-2])
     trajplot.scatter2d(trajs,colors)
+    plt.show()
+    '''
