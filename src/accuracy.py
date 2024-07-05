@@ -15,12 +15,12 @@ def haversine(lon1, lat1, lon2, lat2):
     return c * r
 
 
+# distsance metric
 def euclidean_distance(truth, pred):
     return haversine(truth[:,0],truth[:,1],pred[:,0],pred[:,1])
 
-
 def dtw_distance(truth, pred):
-    return dtw(truth,pred).normalizedDistance
+    return dtw(truth,pred).distance
 
 
 def triangle_height(p1,p2,p3):
@@ -36,3 +36,41 @@ def cross_track_distance(truth, pred):
     close_ind = np.argsort(dist)[:,:2]
     close_truth = truth[close_ind]
     return triangle_height(pred,close_truth[:,0],close_truth[:,1])
+
+
+#
+def probabilistic_accuracy(truth,prob_preds,metric):
+    if metric == 'euclidean':
+        errors = []
+        ends = np.cumsum(np.array([prob_pred.shape[1] for prob_pred in prob_preds]))
+        starts = np.concatenate([np.array([0]),ends[:-1]])
+        for prob_pred,start,end in zip(prob_preds,starts,ends):
+            error = 0
+            for prob_predi in prob_pred:
+                prob = prob_predi[:,1]
+                pred = prob_predi[:,2:4]
+                error += prob * euclidean_distance(truth[start:end],pred)
+            errors.append(error)
+        errors = np.concatenate(errors)
+
+    elif metric == 'cross track':
+        errors = []
+        for prob_pred in prob_preds:
+            error = 0
+            for prob_predi in prob_pred:
+                prob = prob_predi[:,1]
+                pred = prob_predi[:,2:4]
+                error += prob * cross_track_distance(truth,pred)
+            errors.append(error)
+        errors = np.concatenate(errors)
+
+    elif metric == 'dtw':
+        errors = 0
+        for prob_pred in prob_preds:
+            for prob_predi in prob_pred:
+                prob = prob_predi[:,1].mean()
+                pred = prob_predi[:,2:4]
+                errors += prob * dtw_distance(truth,pred)
+
+    return errors
+        
