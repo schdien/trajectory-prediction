@@ -12,10 +12,11 @@ raw_seqs = data.load_files(r"assets/PEK-SHA", usecols=[7, 8, 5],num=3000)
 traj_list = [data.preprocess2(raw_traj) for raw_traj in raw_seqs]
 test_traj = traj_list[0][:350]              #测试轨迹
 start_state = np.array([test_traj[100]])    #开始预测位置点
+truth = test_traj[100:,:2]
 
 
 #----------------------------------------分段聚类和长期预测(2500秒)---------------------------------------#
-querier = SequenceQuerier(traj_list[1:])  #从训练数据剔除测试轨迹
+querier = SequenceQuerier(traj_list[1:])  #从训练数据中剔除测试轨迹
 cluster = PartitionalSequenceCluster(querier.normalizer)
 neighbor_trajs, weights = querier.query(start_state,250,'trajectory')
 states, labels = cluster.fit_predict(neighbor_trajs,True)
@@ -23,7 +24,6 @@ pred_traj = estimate_sequence_mean(states,labels,np.ones_like(weights))
 
 
 #------------------------------------------------精度----------------------------------------------------#
-truth = test_traj[100:,:2]
 euclidean_error = accuracy.probabilistic_accuracy(truth,pred_traj,'euclidean').mean()
 cross_track_error = accuracy.probabilistic_accuracy(truth,pred_traj,'cross track').mean()
 dtw_error = accuracy.probabilistic_accuracy(truth,pred_traj,'dtw')
