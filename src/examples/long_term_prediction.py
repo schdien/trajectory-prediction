@@ -1,9 +1,10 @@
 import numpy as np
-import data
-from neighbors import SequenceQuerier
-from cluster import PartitionalSequenceCluster, SequenceCluster, estimate_mean
+from src import data
+from src.neighbors import SequenceQuerier
+from src.cluster import PartitionalSequenceCluster, SequenceCluster
+from src.estimate import estimate_sequence_mean
 import matplotlib.pyplot as plt
-import accuracy
+from src import accuracy
 
 
 #-------------------------------------------数据读取和预处理---------------------------------------------#
@@ -18,7 +19,7 @@ querier = SequenceQuerier(traj_list[1:])  #从训练数据剔除测试轨迹
 cluster = PartitionalSequenceCluster(querier.normalizer)
 neighbor_trajs, weights = querier.query(start_state,250,'trajectory')
 states, labels = cluster.fit_predict(neighbor_trajs,True)
-pred_traj = estimate_mean(states,labels,np.ones_like(weights))
+pred_traj = estimate_sequence_mean(states,labels,np.ones_like(weights))
 
 
 #------------------------------------------------精度----------------------------------------------------#

@@ -68,26 +68,3 @@ class PartitionalSequenceCluster:
             return self.sequences.swapaxes(0,1), self.labels.T
         else:
             return self.sequences, self.labels
-
-
-# ------------------------------------------------------------------------- #
-def estimate_mean(states,labels,weights):
-    means = [[]]
-    for i,(state,label) in enumerate(zip(states,labels)):
-        kinds = np.unique(label)
-        valid_kinds = kinds[kinds!=-1]
-        if len(valid_kinds)!=0:
-            kinds = valid_kinds
-        cluster_ps = [state[label == kind] for kind in kinds]
-        cluster_ws = [weights[label == kind] for kind in kinds]
-        weights_sum = np.array([np.sum(w) for w in cluster_ws])
-        mean = np.array([np.sum(s.T * w, axis=1) / p for s, w, p in zip(cluster_ps, cluster_ws, weights_sum)])
-        prob = weights_sum / np.sum(weights_sum)
-        if i == 0:
-            prev_kinds = kinds
-        if len(kinds) != len(prev_kinds):
-            means.append([])
-        means[-1].append(np.column_stack([kinds,prob,mean]))
-        prev_kinds = kinds
-    means = [np.stack(mean,axis=1) for mean in means]
-    return means
