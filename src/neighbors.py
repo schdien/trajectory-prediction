@@ -1,5 +1,5 @@
 import numpy as np
-from sklearn.neighbors import BallTree
+from sklearn.neighbors import KDTree
 from sklearn.preprocessing import MinMaxScaler
 
 
@@ -10,7 +10,7 @@ class SequenceQuerier:
         self.ends = np.repeat(np.cumsum(lengths)-1,lengths)
         self.normalizer = MinMaxScaler()
         normalized_trajs = self.normalizer.fit_transform(self.trajs)
-        self.tree = BallTree(normalized_trajs)
+        self.tree = KDTree(normalized_trajs)
 
     def query(self, x, step, mode, k=100):
         x = self.normalizer.transform(x)
@@ -18,7 +18,7 @@ class SequenceQuerier:
         ends = self.ends[inds]
 
         if mode == 'state':
-            y = self.trajs[min(inds+step,ends)]
+            y = self.trajs[np.min(np.stack((inds+step,ends)),axis=0)]
 
         elif mode == 'trajectory':
             if len(x) != 1:

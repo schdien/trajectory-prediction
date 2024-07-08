@@ -1,7 +1,8 @@
 import numpy as np
+from math import pi
 
 
-def estimate_mean(states,labels,weights):
+def estimate_mean(states,labels,weights,return_max_prob=False):
     kinds = np.unique(labels)
     valid_kinds = kinds[kinds!=-1]
     if len(valid_kinds)!=0:
@@ -11,6 +12,8 @@ def estimate_mean(states,labels,weights):
     weights_sum = np.array([np.sum(w) for w in cluster_ws])
     means = np.array([np.sum(s.T * w, axis=1) / p for s, w, p in zip(cluster_ps, cluster_ws, weights_sum)])
     probs = weights_sum / np.sum(weights_sum)
+    if return_max_prob:
+        return means[np.argmax(probs)]
     return kinds, probs, means
 
 
