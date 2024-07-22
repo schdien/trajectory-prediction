@@ -45,7 +45,7 @@ def preprocess2(traj):
     t = extract_time(pos, v)
     pos = resample(pos, t, 10)
     v = extract_velocity(pos, 10)
-    traj = np.column_stack([pos[:-1], v])
+    traj = np.column_stack([pos[1:], v])
     return traj
 
 #数据集
