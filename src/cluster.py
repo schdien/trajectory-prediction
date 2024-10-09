@@ -2,6 +2,7 @@ import numpy as np
 from sklearn.cluster import DBSCAN
 from dtw import dtw
 from scipy import stats
+from collections import deque
 
 
 def func(trajs):
@@ -76,24 +77,32 @@ class PartitionalSequenceCluster:
             return self.sequences.swapaxes(0,1), self.labels.T
         else:
             return self.sequences, self.labels
-        
 
-class DBTPSCAN:
+class DBTPSCAN4:
     def __init__(self,trajs,eps,min_samples) -> None:
         self.eps = eps
         self.min_samples = min_samples
         self.trajs = trajs
-        self.labels = [np.column_stack([np.ones(len(traj))*i,np.arange(len(traj))]) for i,traj in enumerate(trajs)]
+        self.labels = [-np.ones(len(traj)) for traj in trajs]
+        self.times = [np.arange(len(traj)) for traj in trajs]
         self.grouped =[np.empty(0) for _ in range(len(trajs))]
+        self.curr_label = 0
 
     def get_ungrouped(self):
-        for i,(g,traj) in enumerate(zip(self.grouped,self.trajs)):
-            full = np.arange(len(traj))
-            ungrouped = full[~np.isin(full,g)]
-            if len(ungrouped) != 0:
-                return i,ungrouped
+        for i,label in enumerate(self.labels):
+            ungrouped_ts = np.where(label == -1)[0]
+            if len(ungrouped_ts) != 0:
+                return i,ungrouped_ts
             elif i==len(self.trajs)-1:
                 return None
+
+    def modify_label(self,i,ts,c):
+        self.labels[i][ts] = c
+    
+    def modify_time(self,i1,ts1,i2,ts2):
+        self.times[i1][ts1] = self.times[i2][ts2]
+
+
 
     def noise_filter(self,ts):
         ts = np.unique(ts)
@@ -103,11 +112,111 @@ class DBTPSCAN:
         b = np.append(False,b)
         return ts[a|b]
 
-    def append_to_grouped(self,i,ts):
-        self.grouped[i] = np.concatenate([self.grouped[i],ts])
+    def query(self,i,ts):
+        neighbors_i = []
+        neighbors_ts = []
+        ref_traj = self.trajs[i][ts]
+        for j,traj in enumerate(self.trajs):
+            if i ==j:
+                continue
+            pos_dists = np.sqrt(np.sum((ref_traj[:, np.newaxis, :2] - traj[np.newaxis, :, :2]) ** 2, axis=-1))
+            dir_dists = np.sqrt(np.sum(((ref_traj[:, 2:]/np.linalg.norm(ref_traj[:, 2:],axis=1,keepdims=True))[:,np.newaxis,:] - (traj[:, 2:]/np.linalg.norm(traj[:, 2:],axis=1,keepdims=True))[np.newaxis,:,:]) ** 2,axis=-1))
+            dists = np.maximum(pos_dists*0.9,dir_dists)
+            min_dist = np.min(dists, axis=1)
+            neighbor_ts = np.argmin(dists, axis=1)
+            neighbor_ts[min_dist>self.eps] = -1
+            min_dist2 = np.min(dists, axis=0)
+            neighbor_ts2 = np.argmin(dists, axis=0)
+            neighbor_ts2[min_dist2>self.eps] = -1
+            neighbors_i.append(j)
+            neighbors_ts.append(neighbor_ts)
+        return np.array(neighbors_i), np.array(neighbors_ts)
+
+    def query2(self,i,mask):
+        neighbors = []
+        ref_traj = self.trajs[i][mask]
+        neighbors_num = np.zeros(len(ref_traj))
+        for j,traj in enumerate(self.trajs):
+            if i ==j:
+                continue
+            pos_dists = np.sqrt(np.sum((ref_traj[:, np.newaxis, :2] - traj[np.newaxis, :, :2]) ** 2, axis=-1))
+            dir_dists = np.sqrt(np.sum(((ref_traj[:, 2:]/np.linalg.norm(ref_traj[:, 2:],axis=1,keepdims=True))[:,np.newaxis,:] - (traj[:, 2:]/np.linalg.norm(traj[:, 2:],axis=1,keepdims=True))[np.newaxis,:,:]) ** 2,axis=-1))
+            dists = np.maximum(pos_dists*0.9,dir_dists)
+            neighbor_mask = np.any(dists<self.eps,axis=0)
+            pair = np.argmin(dists, axis=0)
+            neighbors.append((j,neighbor_mask,pair))
+            neighbor_mask2 = np.any(dists<self.eps,axis=1)
+            neighbors_num = neighbors_num + neighbor_mask2
+        return neighbors, neighbors_num
+
+    def build(self,i,mask):
+        q = deque()
+        q.append((i,mask))
+        while q:
+            i,mask = q.popleft()
+            #先加入组？
+            #查询当前轨迹与其余轨迹的相邻情况，-1表示该时间索引处与这条轨迹没有相邻点，！=-1的值表示相邻点的时间索引
+            neighbors,neighbors_num = self.query2(i,mask)
+
+            #分组
+            for n_i,neighbor_mask,pair in neighbors:
+                ungroup_mask = self.labels[n_i] == -1
+                ungroup_neighbor_mask = neighbor_mask & ungroup_mask
+                #未分组&邻居加入组
+                if np.sum(ungroup_neighbor_mask) < 5:
+                    continue
+                self.labels[n_i][ungroup_neighbor_mask] = self.curr_label #修改标签
+
+                #核心点邻居&未分组加入扩散队列
+                core_mask = neighbors_num[pair] >= self.min_samples
+                core_ungroup_neighbor_mask = ungroup_neighbor_mask & core_mask
+                q.append((n_i,core_ungroup_neighbor_mask))
+
+
+
+    def cluster(self):
+        for i,label in enumerate(self.labels):
+            if i == 4:
+                break
+            is_ungroup = label == -1
+            #ts = self.noise_filter(ts) #加上以后噪声点可能会被分配到其他轨迹组中
+            if np.sum(is_ungroup) != 0:
+                #_,neighbors_ts = self.query(i,ts)
+                #neighbor_num = np.count_nonzero(neighbors_ts!=-1,axis=0)
+                #is_core = neighbor_num>=self.min_samples
+                #ts = ts[is_core]
+                self.labels[i][is_ungroup] = self.curr_label #这个组的初始核心点，从这里开始扩散
+                self.build(i,is_ungroup)
+                self.curr_label += 1
+
+
+class DBTPSCAN2:
+    def __init__(self,trajs,eps,min_samples) -> None:
+        self.eps = eps
+        self.min_samples = min_samples
+        self.trajs = trajs
+        self.labels = [-np.ones(len(traj)) for traj in trajs]
+        self.times = [np.arange(len(traj)) for traj in trajs]
+        #self.grouped =[np.empty(0) for _ in range(len(trajs))]
+        self.curr_label = 0
+
+    def modify_label(self,i,ts,c):
+        self.labels[i][ts] = c
 
     def is_grouped(self,i,ts):
-        return np.isin(ts,self.grouped[i])
+        grouped_ts = np.where(self.labels[i] != -1)[0]
+        return np.isin(ts,grouped_ts)
+    
+    def modify_time(self,i1,ts1,i2,ts2):
+        self.times[i1][ts1] = self.times[i2][ts2]
+
+    def noise_filter(self,ts):
+        ts = np.unique(ts)
+        a = ts[:-1] == ts[1:] - 1
+        b = ts[1:] == ts[:-1] + 1
+        a = np.append(a,False)
+        b = np.append(False,b)
+        return ts[a|b]
 
     def query(self,i,ts):
         neighbors_i = []
@@ -126,157 +235,203 @@ class DBTPSCAN:
             neighbors_ts.append(neighbor_ts)
         return np.array(neighbors_i), np.array(neighbors_ts)
 
-    def build(self,i,ts):
-        #查询当前轨迹与其余轨迹的相邻情况，-1表示该时间索引处与这条轨迹没有相邻点，！=-1的值表示相邻点的时间索引
+    def cluster(self):
+        for i,label in enumerate(self.labels):
+            if i == 4:
+                break
+            ts = np.where(label == -1)[0]
+            if len(ts) != 0:
+                self.build(i,ts,i,ts)
+                self.curr_label += 1
+
+    def build(self,i,ts,u_i,u_ts):
+        #查找未分组
+        is_ungrouped = ~self.is_grouped(i,ts)
+        ts = ts[is_ungrouped]
+        if len(ts) == 0:
+            return
+        u_ts = u_ts[is_ungrouped]
+        #查找未分组的点的邻居
         neighbors_i,neighbors_ts = self.query(i,ts)
-        is_ungrouped_neighbor = []
-        #分组
-        for n_i,n_ts in zip(neighbors_i,neighbors_ts):
-            is_grouped = self.is_grouped(n_i,n_ts) #已分组？
-            is_neighbor = n_ts!=-1  #相邻？
-            mask = (~is_grouped) & is_neighbor #有效时间索引：未分组且相邻
-            self.append_to_grouped(n_i,n_ts[mask]) #标记为已分组
-            self.labels[n_i][n_ts[mask]] = self.labels[i][ts[mask]]  #加入组中
-            is_ungrouped_neighbor.append(mask)  #储存有效时间索引为下一步核心点扩散使用
-
-        #查找核心点核心点：其他轨迹的邻居数>n，并且自身轨迹两侧都有m个索引相邻的点
+        #判断是否为核心点，取出核心点邻居用于扩散。核心点：其他轨迹的邻居数>n，并且自身轨迹两侧都有m个索引相邻的点
         neighbor_num = np.count_nonzero(neighbors_ts!=-1,axis=0)
-        is_core = neighbor_num>=self.min_samples
-        #核心点的未分组邻居扩散
-        for n_i,n_ts,mask in zip(neighbors_i,neighbors_ts,is_ungrouped_neighbor):
-            mask = mask & is_core
-            n_ts = n_ts[mask]
+        is_core = neighbor_num>5
+        #加入上级组
+        self.modify_label(i,ts,self.curr_label)
+        self.modify_time(i,ts,u_i,u_ts)
+        #核心点邻居扩散
+        for n_i,n_ts in zip(neighbors_i,neighbors_ts):
+            is_neighbor = n_ts!=-1
+            valid = is_neighbor #& is_core
+            n_ts = n_ts[valid]
+            match_ts = ts[valid]
             if len(n_ts)>5:
-                n_ts = self.noise_filter(n_ts)
-                self.build(n_i,n_ts)
+                self.build(n_i,n_ts,i,match_ts)
 
-        #要拆分循环，使第一次的邻居全部分组完成
 
+class DBTPSCAN3:
+    def __init__(self,trajs,eps,min_samples) -> None:
+        self.eps = eps
+        self.min_samples = min_samples
+        self.trajs = trajs
+        self.labels = [-np.ones(len(traj)) for traj in trajs]
+        self.curr_label = 0
+
+    def modify_label(self,i,ts,c):
+        self.labels[i][ts] = c
+
+    def is_grouped(self,i,ts):
+        grouped_ts = np.where(self.labels[i] != -1)[0]
+        return np.isin(ts,grouped_ts)
+
+    def query(self,i,ts):
+        neighbors_i = []
+        neighbors_ts = []
+        ref_traj = self.trajs[i][ts]
+        for j,traj in enumerate(self.trajs):
+            if i ==j:
+                continue
+            pos_dists = np.sqrt(np.sum((ref_traj[:, np.newaxis, :2] - traj[np.newaxis, :, :2]) ** 2, axis=-1))
+            dir_dists = np.sqrt(np.sum(((ref_traj[:, 2:]/np.linalg.norm(ref_traj[:, 2:],axis=1,keepdims=True))[:,np.newaxis,:] - (traj[:, 2:]/np.linalg.norm(traj[:, 2:],axis=1,keepdims=True))[np.newaxis,:,:]) ** 2,axis=-1))
+            dists = np.maximum(pos_dists*0.9,dir_dists)
+            min_dist = np.min(dists, axis=1)
+            neighbor_ts = np.argmin(dists, axis=1)
+            neighbor_ts[min_dist>self.eps] = -1
+            neighbors_i.append(j)
+            neighbors_ts.append(neighbor_ts)
+        return np.array(neighbors_i), np.array(neighbors_ts)
 
     def cluster(self):
-        while True:
-            ungrouped = self.get_ungrouped()
-            if ungrouped is None:
-                break
-            self.append_to_grouped(*ungrouped)
-            self.build(*ungrouped)
-'''
-    def get_ungrouped2(self):
         for i,label in enumerate(self.labels):
-            ungrouped = np.where(label[:,0] == -1)[0]
-            if len(ungrouped) == 0 and i==len(self.trajs)-1:
-                return i,None
-            if len(ungrouped) == 0:
-                continue
-            return i,ungrouped
-    def cluster2(self):
-        while True:
-            i,idxs = self.get_ungrouped()
-            if idxs is None:
-                break
-            self.build2(i,idxs,i,idxs)
+            ts = np.where(label == -1)[0]
+            if len(ts) != 0:
+                self.build(i,ts)
+                self.curr_label += 1
 
-    def build2(self,i,idxs,u_i,u_idxs):
+    def build(self,i,ts):
         #查找未分组
-        ungrouped_idxs = np.where(self.labels[i][:,0] == -1)[0]
-        if len(ungrouped_idxs) == 0:
+        is_ungrouped = ~self.is_grouped(i,ts)
+        ts = ts[is_ungrouped]
+        if len(ts) == 0:
             return
-        is_ungrouped = np.isin(idxs,ungrouped_idxs)
-        idxs = idxs[is_ungrouped]
-        u_idxs = u_idxs[is_ungrouped]
-        #加入上级组
-        self.mark_grouped(i,idxs)
-        self.labels[i][idxs] = self.labels[u_i][u_idxs]
         #查找未分组的点的邻居
-        neighbors_i,neighbors_idxs = self.query(i,idxs,0.03)
+        neighbors_i,neighbors_ts = self.query(i,ts)
         #判断是否为核心点，取出核心点邻居用于扩散。核心点：其他轨迹的邻居数>n，并且自身轨迹两侧都有m个索引相邻的点
-        neighbor_num = np.count_nonzero(neighbors_idxs!=-1,axis=0)
+        neighbor_num = np.count_nonzero(neighbors_ts!=-1,axis=0)
         is_core = neighbor_num>5
+        #加入上级组
+        self.modify_label(i,ts,self.curr_label)
         #核心点邻居扩散
-        for n_i,n_idxs in zip(neighbors_i,neighbors_idxs):
-            is_neighbor = n_idxs!=-1
-            valid = is_neighbor & is_core
-            n_idxs = n_idxs[valid]
-            match_idxs = idxs[valid]
-            if len(n_idxs)>5:
-                self.build2(n_i,n_idxs,i,match_idxs)
+        for n_i,n_ts in zip(neighbors_i,neighbors_ts):
+            is_neighbor = n_ts!=-1
+            valid = is_neighbor #& is_core
+            n_ts = n_ts[valid]
+            if len(n_ts)>5:
+                self.build(n_i,n_ts)
+
+from sklearn.neighbors import KDTree
+import time
+
+class DBTPSCAN:
+    def __init__(self,trajs,eps,min_samples,min_len) -> None:
+        self.eps = eps
+        self.min_samples = min_samples
+        self.min_len = min_len
+        self.trajs_num = len(trajs)
+        self.trajs = np.vstack([np.hstack([traj[:,:2],traj[:, 2:]/np.linalg.norm(traj[:, 2:],axis=1,keepdims=True)*1.1]) for traj in trajs])
+        self.tree = KDTree(self.trajs)
+        self.identifiers = np.hstack([np.ones(len(traj),dtype=int)*i for i,traj in enumerate(trajs)])
+        self.ts = np.hstack([np.arange(len(traj),dtype=int) for traj in trajs])
+        self.labels = -np.ones(len(self.trajs))
+        self.curr_label = 0
+        self.is_core = None
+        self.is_ungroup = np.ones(len(self.trajs),dtype=bool)
+        self.neighbors_i = [[] for _ in range(len(self.trajs))]
+
+    def get_traj(self,i):
+        return self.trajs[self.identifiers == i]
 
 
+    def get_ungrouped(self):
+        for i,label in enumerate(self.labels):
+            ungrouped_ts = np.where(label == -1)[0]
+            if len(ungrouped_ts) != 0:
+                return i,ungrouped_ts
+            elif i==len(self.trajs)-1:
+                return None
 
-    def build(self,i,idxs):
-        #查询邻居
-        neighbors_i,neighbors_idxs = self.query(i,idxs,0.03)
-        #判断是否为核心点，取出核心点的邻居。核心点：其他轨迹的邻居数>n，并且自身轨迹两侧都有m个索引相邻的点
-        neighbor_num = np.count_nonzero(neighbors_idxs!=-1,axis=0)
-        core_neighbors_idxs = neighbors_idxs[:,np.where(neighbor_num>5)[0]] #核心点的邻居
-        core_neighbors_idxs = [core_neighbor_idxs[core_neighbor_idxs!=-1] for core_neighbor_idxs in core_neighbors_idxs]
-        ungrouped_idxs = [np.where(self.labels[neighbor_i][:,0] == -1)[0] for neighbor_i in neighbors_i]
+    def noise_filter(self,ts):
+        ts = np.unique(ts)
+        a = ts[:-1] == ts[1:] - 1
+        b = ts[1:] == ts[:-1] + 1
+        a = np.append(a,False)
+        b = np.append(False,b)
+        return ts[a|b]
 
-        ungrouped_neighbors_idxs = [] #这一部分加入组中
-        match_idxs = []
-        for n_idxs,ug_idxs in zip(neighbors_idxs,ungrouped_idxs):
-            ug_n_idxs,pos,_ = np.intersect1d(n_idxs,ug_idxs,return_indices=True) #bug/
-            ungrouped_neighbors_idxs.append(ug_n_idxs)
-            match_idxs.append(idxs[pos])
-
-        ungrouped_core_neighbors_idxs = [np.intersect1d(x,y) for x,y in zip(core_neighbors_idxs,ungrouped_neighbors_idxs)] #这一部分在加入组后扩散
+    def query_neighbors(self):
+        neighbors,_ = self.tree.query_radius(self.trajs,self.eps,return_distance=True,sort_results=True)
+        for i,(neighbor,curr_id) in enumerate(zip(neighbors,self.identifiers)):
+            neighbor_ids = self.identifiers[neighbor]
+            neighbor_ids,ind = np.unique(neighbor_ids,return_index=True)
+            ind = ind[neighbor_ids != curr_id]
+            neighbors[i] = neighbor[ind]
         
-        #分组
-        for n_i,n_idxs,m_idxs in zip(neighbors_i,ungrouped_neighbors_idxs,match_idxs):
-            if len(n_idxs!=0):
-                self.labels[n_i][n_idxs] = self.labels[i][m_idxs]
-                #subplot.scatter(self.trajs[n_i][n_idxs,0],self.trajs[n_i][n_idxs,1])
-                #plt.draw()
-
-        #扩散
-        for n_i,ug_c_n_idxs in zip(neighbors_i,ungrouped_core_neighbors_idxs):
-            l = self.labels[n_i][ug_c_n_idxs]
-            if len(ug_c_n_idxs)>5:
-                self.build(n_i,ug_c_n_idxs)
-
-def f1(trajs,eps):
-    #初始化标签每个点的标签组成,第一列为类别标签，第二列为顺序索引
-    #-1：离群值
-    labels = [np.column_stack([np.ones(len(traj))*i,np.arange(len(traj))]) for i,traj in enumerate(trajs)]
-    l = len(trajs)
-    for i in range(l):
-        for j in range(i,l-1):
-            classified_ind = np.where(labels[j][:,0]==i)[0]
-            classified = trajs[j][classified_ind]
-            if len(classified) == 0:
+        for i,neighbor in enumerate(neighbors):
+            for n in neighbor:
+                self.neighbors_i[n].append(i)
+        self.neighbors_i = np.array([np.array(neighbor_i) for neighbor_i in self.neighbors_i],dtype=object)
+        self.is_core = np.array([len(neighbor) >= self.min_samples for neighbor in self.neighbors_i])
+    
+    def get_init_indices(self):
+        for i in range(self.trajs_num):
+            indices = np.where(self.is_core & (self.identifiers == i) & self.is_ungroup)[0]
+            if len(indices) != 0:
+                return indices
+        return None
+    
+    def build(self,init_i):
+        #标记初始序列
+        self.labels[init_i] = self.curr_label 
+        self.is_ungroup[init_i] = False 
+        q = deque()
+        q.append(init_i)
+        while q:
+            i = q.popleft()
+            i = i[self.is_core[i]] #取出核心点
+            if len(i) == 0:
                 continue
-            for k in range(i+1,l):
-                if j==k:
+            for n_i in self.neighbors_i[i]:
+                n_i = n_i[self.is_ungroup[n_i]] #取出未分组
+                self.labels[n_i] = self.curr_label #加入组
+                self.is_ungroup[n_i] = False 
+                if len(i) == 0:
                     continue
-                unclassified_ind = np.where(labels[k][:,0]>i)[0]
-                unclassified = trajs[k][unclassified_ind]
-                if len(unclassified) == 0:
-                    continue
-                pos_dists = np.sqrt(np.sum((classified[:, np.newaxis, :2] - unclassified[np.newaxis, :, :2]) ** 2, axis=-1))
-                dir_dists = np.sqrt(np.sum(((classified[:, 2:]/np.linalg.norm(classified[:, 2:],axis=1,keepdims=True))[:,np.newaxis,:] - (unclassified[:, 2:]/np.linalg.norm(unclassified[:, 2:],axis=1,keepdims=True))[np.newaxis,:,:]) ** 2,axis=-1))
-                dists = pos_dists*0.9 + dir_dists
-                #dists = np.maximum(pos_dists*0.9,dir_dists)
-                min_dist = np.min(dists, axis=0)
-                match_inds1 = np.where(min_dist<=eps)[0]
-                match_inds2 = np.argmin(dists, axis=0)[match_inds1]
-                match_inds1 = unclassified_ind[match_inds1]
-                match_inds2 = classified_ind[match_inds2]
-                labels[k][match_inds1] = labels[j][match_inds2]
-    return labels
-'''
+                q.append(n_i) #扩散
+        self.curr_label += 1
+        
+    def cluster(self):
+        self.query_neighbors()
+        while True:
+            init_i = self.get_init_indices()
+            if init_i is None:
+                break
+            self.build(init_i)
+
+
+
 #plt.switch_backend('TkAgg')
 #plt.ion()
 if __name__ == '__main__':
     from src import data
     import matplotlib.pyplot as plt
-    raw_trajs = data.load_files(r"assets/PEK-SHA", usecols=[7, 8, 5],num=60)
+    raw_trajs = data.load_files(r"assets/PEK-SHA", usecols=[7, 8, 5],num=20)
     traj_list = [data.preprocess2(raw_traj) for raw_traj in raw_trajs]
     subplot = plt.subplot()
-    cluster = DBTPSCAN(traj_list,0.06,5)
+    cluster = DBTPSCAN(traj_list,0.028,1,5)
     cluster.cluster()
 
-    color_tab = {0: 'r',1: 'g',2: 'b',3: 'y',4: 'c',5: 'tan',6: 'm',7: 'pink',8: 'peru',9: 'gray',10: '#8A2BE2',11: '#A52A2A',12: '#DEB887',13: '#5F9EA0',14: '#7FFF00',15: '#D2691E'}
+    color_tab = {-1:'w',0: 'r',1: 'g',2: 'b',3: 'y',4: 'c',5: 'tan',6: 'm',7: 'pink',8: 'peru',9: 'gray',10: '#8A2BE2',11: '#A52A2A',12: '#DEB887',13: '#5F9EA0',14: '#7FFF00',15: '#D2691E'}
     for traj,label in zip(traj_list,cluster.labels[:15]):
-        color = [color_tab[l] for l in label[:,0]]
+        color = [color_tab[l] for l in label]
         subplot.scatter(traj[:,0],traj[:,1],color = color,s=4)
     plt.show()
