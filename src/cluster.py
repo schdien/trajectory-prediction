@@ -3,6 +3,7 @@ from sklearn.cluster import DBSCAN
 from dtw import dtw
 from scipy import stats
 from collections import deque
+from scipy import ndimage
 
 
 def func(trajs):
@@ -342,23 +343,11 @@ class DBTPSCAN:
         self.tree = KDTree(self.trajs)
         self.identifiers = np.hstack([np.ones(len(traj),dtype=int)*i for i,traj in enumerate(trajs)])
         self.ts = np.hstack([np.arange(len(traj),dtype=int) for traj in trajs])
-        self.labels = -np.ones(len(self.trajs))
-        self.curr_label = 0
+        self.labels = -np.ones(len(self.trajs),dtype=int)
         self.is_core = None
         self.is_ungroup = np.ones(len(self.trajs),dtype=bool)
         self.neighbors_i = [[] for _ in range(len(self.trajs))]
-
-    def get_traj(self,i):
-        return self.trajs[self.identifiers == i]
-
-
-    def get_ungrouped(self):
-        for i,label in enumerate(self.labels):
-            ungrouped_ts = np.where(label == -1)[0]
-            if len(ungrouped_ts) != 0:
-                return i,ungrouped_ts
-            elif i==len(self.trajs)-1:
-                return None
+        self.curr_id = 0
 
     def noise_filter(self,ts):
         ts = np.unique(ts)
@@ -382,16 +371,47 @@ class DBTPSCAN:
         self.neighbors_i = np.array([np.array(neighbor_i) for neighbor_i in self.neighbors_i],dtype=object)
         self.is_core = np.array([len(neighbor) >= self.min_samples for neighbor in self.neighbors_i])
     
+    def filter_split(self,identifier,mask):
+        id_mask = self.identifiers == identifier
+        mask = mask & self.is_ungroup & id_mask
+        if np.all(~mask):
+            return []
+        mask = ndimage.binary_closing(mask,mask=id_mask).astype(bool)
+        indices = np.where(mask)[0]
+        diff_indices = np.diff(indices)
+        split_i = np.nonzero(diff_indices > 1)[0] + 1
+        indices = np.split(indices,split_i)
+        return list(filter(lambda x: len(x)>=self.min_len,indices))
+
     def get_init_indices(self):
-        for i in range(self.trajs_num):
-            indices = np.where(self.is_core & (self.identifiers == i) & self.is_ungroup)[0]
-            if len(indices) != 0:
-                return indices
+        while self.curr_id < self.trajs_num:
+            indices = self.filter_split(self.curr_id,self.is_core)
+            if len(indices) == 0:
+                self.curr_id += 1
+                continue
+            return indices[0]
+            '''
+            mask = self.identifiers == self.curr_id
+            is_valid = self.is_core & self.is_ungroup & mask
+            is_valid = ndimage.binary_closing(is_valid,mask=mask).astype(bool)
+            indices = np.where(is_valid)[0]
+            if len(indices) == 0:
+                self.curr_id += 1
+                continue
+            diff_indices = np.diff(indices)
+            split_i = np.nonzero(diff_indices > 1)[0] + 1
+            indices = np.split(indices,split_i)
+            for ind in indices:
+                if len(ind) < self.min_len:
+                    continue
+                return ind
+            self.curr_id += 1
+            '''
         return None
     
-    def build(self,init_i):
+    def build(self,init_i,curr_label):
         #标记初始序列
-        self.labels[init_i] = self.curr_label 
+        self.labels[init_i] = curr_label 
         self.is_ungroup[init_i] = False 
         q = deque()
         q.append(init_i)
@@ -400,22 +420,48 @@ class DBTPSCAN:
             i = i[self.is_core[i]] #取出核心点
             if len(i) == 0:
                 continue
-            for n_i in self.neighbors_i[i]:
+            neighbor_i = self.neighbors_i[i]
+            for n_i in neighbor_i:
                 n_i = n_i[self.is_ungroup[n_i]] #取出未分组
-                self.labels[n_i] = self.curr_label #加入组
+                self.labels[n_i] = curr_label #加入组
                 self.is_ungroup[n_i] = False 
                 if len(i) == 0:
                     continue
                 q.append(n_i) #扩散
-        self.curr_label += 1
+
+    def build2(self,init_i,curr_label):
+        #标记初始序列
+        self.labels[init_i] = curr_label 
+        self.is_ungroup[init_i] = False 
+        q = deque()
+        q.append(init_i)
+        while q:
+            i = q.popleft()
+            i = i[self.is_core[i]] #取出核心点
+            if len(i) == 0:
+                continue
+            neighbor_i = np.hstack(self.neighbors_i[i])
+            neighbor_mask = np.zeros(len(self.trajs),dtype=bool)
+            neighbor_mask[neighbor_i] = True
+            for id in range(self.trajs_num):
+                neighbor_idxs = self.filter_split(id,neighbor_mask)
+                if len(neighbor_idxs) == 0:
+                    continue
+                neighbor_idxs = np.hstack(neighbor_idxs)
+                self.labels[neighbor_idxs] = curr_label #加入组
+                self.is_ungroup[neighbor_idxs] = False 
+                q.append(neighbor_idxs) #扩散
         
     def cluster(self):
         self.query_neighbors()
+        curr_label = 0
         while True:
             init_i = self.get_init_indices()
             if init_i is None:
                 break
-            self.build(init_i)
+            self.build2(init_i,curr_label)
+            curr_label += 1
+        self.labels = [self.labels[self.identifiers==i] for i in range(self.trajs_num)]
 
 
 
@@ -424,14 +470,20 @@ class DBTPSCAN:
 if __name__ == '__main__':
     from src import data
     import matplotlib.pyplot as plt
-    raw_trajs = data.load_files(r"assets/PEK-SHA", usecols=[7, 8, 5],num=20)
+    from matplotlib.colors import ListedColormap
+
+
+    colors = ['white', 'red', 'green', 'blue', 'yellow', 'purple', 'orange']
+    # 创建一个颜色映射表
+    cmap = ListedColormap(colors)
+
+    raw_trajs = data.load_files(r"assets/PEK-SHA", usecols=[7, 8, 5],num=50)
     traj_list = [data.preprocess2(raw_traj) for raw_traj in raw_trajs]
     subplot = plt.subplot()
-    cluster = DBTPSCAN(traj_list,0.028,1,5)
+    cluster = DBTPSCAN(traj_list,0.028,3,8)
     cluster.cluster()
-
     color_tab = {-1:'w',0: 'r',1: 'g',2: 'b',3: 'y',4: 'c',5: 'tan',6: 'm',7: 'pink',8: 'peru',9: 'gray',10: '#8A2BE2',11: '#A52A2A',12: '#DEB887',13: '#5F9EA0',14: '#7FFF00',15: '#D2691E'}
-    for traj,label in zip(traj_list,cluster.labels[:15]):
-        color = [color_tab[l] for l in label]
+    for traj,label in zip(traj_list,cluster.labels):
+        color = [cmap(l+1) for l in label]
         subplot.scatter(traj[:,0],traj[:,1],color = color,s=4)
     plt.show()
