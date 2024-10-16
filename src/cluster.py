@@ -94,7 +94,7 @@ class DBTPSCAN4:
             ungrouped_ts = np.where(label == -1)[0]
             if len(ungrouped_ts) != 0:
                 return i,ungrouped_ts
-            elif i==len(self.trajs)-1:
+            elif i==self.total_num-1:
                 return None
 
     def modify_label(self,i,ts,c):
@@ -179,15 +179,15 @@ class DBTPSCAN4:
         for i,label in enumerate(self.labels):
             if i == 4:
                 break
-            is_ungroup = label == -1
+            ungroup_mask = label == -1
             #ts = self.noise_filter(ts) #加上以后噪声点可能会被分配到其他轨迹组中
-            if np.sum(is_ungroup) != 0:
+            if np.sum(ungroup_mask) != 0:
                 #_,neighbors_ts = self.query(i,ts)
                 #neighbor_num = np.count_nonzero(neighbors_ts!=-1,axis=0)
-                #is_core = neighbor_num>=self.min_samples
-                #ts = ts[is_core]
-                self.labels[i][is_ungroup] = self.curr_label #这个组的初始核心点，从这里开始扩散
-                self.build(i,is_ungroup)
+                #core_mask = neighbor_num>=self.min_samples
+                #ts = ts[core_mask]
+                self.labels[i][ungroup_mask] = self.curr_label #这个组的初始核心点，从这里开始扩散
+                self.build(i,ungroup_mask)
                 self.curr_label += 1
 
 
@@ -247,23 +247,23 @@ class DBTPSCAN2:
 
     def build(self,i,ts,u_i,u_ts):
         #查找未分组
-        is_ungrouped = ~self.is_grouped(i,ts)
-        ts = ts[is_ungrouped]
+        ungroup_masked = ~self.is_grouped(i,ts)
+        ts = ts[ungroup_masked]
         if len(ts) == 0:
             return
-        u_ts = u_ts[is_ungrouped]
+        u_ts = u_ts[ungroup_masked]
         #查找未分组的点的邻居
         neighbors_i,neighbors_ts = self.query(i,ts)
         #判断是否为核心点，取出核心点邻居用于扩散。核心点：其他轨迹的邻居数>n，并且自身轨迹两侧都有m个索引相邻的点
         neighbor_num = np.count_nonzero(neighbors_ts!=-1,axis=0)
-        is_core = neighbor_num>5
+        core_mask = neighbor_num>5
         #加入上级组
         self.modify_label(i,ts,self.curr_label)
         self.modify_time(i,ts,u_i,u_ts)
         #核心点邻居扩散
         for n_i,n_ts in zip(neighbors_i,neighbors_ts):
             is_neighbor = n_ts!=-1
-            valid = is_neighbor #& is_core
+            valid = is_neighbor #& core_mask
             n_ts = n_ts[valid]
             match_ts = ts[valid]
             if len(n_ts)>5:
@@ -311,27 +311,29 @@ class DBTPSCAN3:
 
     def build(self,i,ts):
         #查找未分组
-        is_ungrouped = ~self.is_grouped(i,ts)
-        ts = ts[is_ungrouped]
+        ungroup_masked = ~self.is_grouped(i,ts)
+        ts = ts[ungroup_masked]
         if len(ts) == 0:
             return
         #查找未分组的点的邻居
         neighbors_i,neighbors_ts = self.query(i,ts)
         #判断是否为核心点，取出核心点邻居用于扩散。核心点：其他轨迹的邻居数>n，并且自身轨迹两侧都有m个索引相邻的点
         neighbor_num = np.count_nonzero(neighbors_ts!=-1,axis=0)
-        is_core = neighbor_num>5
+        core_mask = neighbor_num>5
         #加入上级组
         self.modify_label(i,ts,self.curr_label)
         #核心点邻居扩散
         for n_i,n_ts in zip(neighbors_i,neighbors_ts):
             is_neighbor = n_ts!=-1
-            valid = is_neighbor #& is_core
+            valid = is_neighbor #& core_mask
             n_ts = n_ts[valid]
             if len(n_ts)>5:
                 self.build(n_i,n_ts)
 
 from sklearn.neighbors import KDTree
+from threading import Event,Thread
 import time
+
 
 class DBTPSCAN:
     def __init__(self,trajs,eps,min_samples,min_len) -> None:
@@ -340,129 +342,141 @@ class DBTPSCAN:
         self.min_len = min_len
         self.trajs_num = len(trajs)
         self.trajs = np.vstack([np.hstack([traj[:,:2],traj[:, 2:]/np.linalg.norm(traj[:, 2:],axis=1,keepdims=True)*1.1]) for traj in trajs])
+        self.clustered_num = 0
+        self.total_num = len(self.trajs)
         self.tree = KDTree(self.trajs)
         self.identifiers = np.hstack([np.ones(len(traj),dtype=int)*i for i,traj in enumerate(trajs)])
         self.ts = np.hstack([np.arange(len(traj),dtype=int) for traj in trajs])
-        self.labels = -np.ones(len(self.trajs),dtype=int)
-        self.is_core = None
-        self.is_ungroup = np.ones(len(self.trajs),dtype=bool)
-        self.neighbors_i = [[] for _ in range(len(self.trajs))]
-        self.curr_id = 0
+        self.labels = -np.ones(self.total_num,dtype=int)
+        self.core_mask = None
+        self.ungroup_mask = np.ones(self.total_num,dtype=bool)
+        self.neighbors = None
+        self.sequence = {}
+        self.labels2 = None
 
-    def noise_filter(self,ts):
-        ts = np.unique(ts)
-        a = ts[:-1] == ts[1:] - 1
-        b = ts[1:] == ts[:-1] + 1
-        a = np.append(a,False)
-        b = np.append(False,b)
-        return ts[a|b]
-
-    def query_neighbors(self):
-        neighbors,_ = self.tree.query_radius(self.trajs,self.eps,return_distance=True,sort_results=True)
-        for i,(neighbor,curr_id) in enumerate(zip(neighbors,self.identifiers)):
-            neighbor_ids = self.identifiers[neighbor]
-            neighbor_ids,ind = np.unique(neighbor_ids,return_index=True)
-            ind = ind[neighbor_ids != curr_id]
-            neighbors[i] = neighbor[ind]
+    def culculate_neighbors(self):
+        forward_neighbors,_ = self.tree.query_radius(self.trajs,self.eps,return_distance=True,sort_results=True)
+        for i,(neighbor,curr_id) in enumerate(zip(forward_neighbors,self.identifiers)):
+            neighbor_ids = self.identifiers[neighbor] #查找邻居所在的轨迹id
+            neighbor_ids,ind = np.unique(neighbor_ids,return_index=True)    #同一轨迹中的点只保留最近的
+            ind = ind[neighbor_ids != curr_id]  #去除自身所在轨迹的点
+            forward_neighbors[i] = neighbor[ind]
         
-        for i,neighbor in enumerate(neighbors):
+        backward_neighbors = [[] for _ in range(self.total_num)]
+        for i,neighbor in enumerate(forward_neighbors):
             for n in neighbor:
-                self.neighbors_i[n].append(i)
-        self.neighbors_i = np.array([np.array(neighbor_i) for neighbor_i in self.neighbors_i],dtype=object)
-        self.is_core = np.array([len(neighbor) >= self.min_samples for neighbor in self.neighbors_i])
+                backward_neighbors[n].append(i)
+
+        self.neighbors = np.array([np.array(neighbor) for neighbor in backward_neighbors],dtype=object)
+        self.core_mask = np.array([len(neighbor) >= self.min_samples for neighbor in self.neighbors])
     
     def filter_split(self,identifier,mask):
         id_mask = self.identifiers == identifier
-        mask = mask & self.is_ungroup & id_mask
+        mask = mask & id_mask
         if np.all(~mask):
             return []
         mask = ndimage.binary_closing(mask,mask=id_mask).astype(bool)
-        indices = np.where(mask)[0]
-        diff_indices = np.diff(indices)
-        split_i = np.nonzero(diff_indices > 1)[0] + 1
-        indices = np.split(indices,split_i)
-        return list(filter(lambda x: len(x)>=self.min_len,indices))
-
-    def get_init_indices(self):
-        while self.curr_id < self.trajs_num:
-            indices = self.filter_split(self.curr_id,self.is_core)
-            if len(indices) == 0:
-                self.curr_id += 1
-                continue
-            return indices[0]
-            '''
-            mask = self.identifiers == self.curr_id
-            is_valid = self.is_core & self.is_ungroup & mask
-            is_valid = ndimage.binary_closing(is_valid,mask=mask).astype(bool)
-            indices = np.where(is_valid)[0]
-            if len(indices) == 0:
-                self.curr_id += 1
-                continue
-            diff_indices = np.diff(indices)
-            split_i = np.nonzero(diff_indices > 1)[0] + 1
-            indices = np.split(indices,split_i)
-            for ind in indices:
-                if len(ind) < self.min_len:
-                    continue
-                return ind
-            self.curr_id += 1
-            '''
-        return None
+        idxs = np.where(mask)[0]
+        diff_idxs = np.diff(idxs)
+        split_i = np.nonzero(diff_idxs > 1)[0] + 1
+        idxs = np.split(idxs,split_i)
+        return list(filter(lambda x: len(x)>=self.min_len,idxs))
     
-    def build(self,init_i,curr_label):
-        #标记初始序列
-        self.labels[init_i] = curr_label 
-        self.is_ungroup[init_i] = False 
-        q = deque()
-        q.append(init_i)
-        while q:
-            i = q.popleft()
-            i = i[self.is_core[i]] #取出核心点
-            if len(i) == 0:
-                continue
-            neighbor_i = self.neighbors_i[i]
-            for n_i in neighbor_i:
-                n_i = n_i[self.is_ungroup[n_i]] #取出未分组
-                self.labels[n_i] = curr_label #加入组
-                self.is_ungroup[n_i] = False 
-                if len(i) == 0:
-                    continue
-                q.append(n_i) #扩散
+    def filter_split2(self,mask):
+        if np.all(~mask):
+            return []
+        mask = ndimage.binary_closing(mask).astype(bool)
+        idxs = np.where(mask)[0]
+        diff_idxs = np.diff(idxs)
+        split_i = np.nonzero(diff_idxs > 1)[0] + 1
+        idxs = np.split(idxs,split_i)
+        idxs = tuple(filter(lambda x: len(x)>=2,idxs))
+        if len(idxs) == 0:
+            return []
+        return np.hstack(idxs)
 
-    def build2(self,init_i,curr_label):
+    def build_cluster(self,init_idx,curr_label):
         #标记初始序列
-        self.labels[init_i] = curr_label 
-        self.is_ungroup[init_i] = False 
+        self.labels[init_idx] = curr_label 
+        self.ungroup_mask[init_idx] = False 
         q = deque()
-        q.append(init_i)
+        q.append(init_idx)
         while q:
-            i = q.popleft()
-            i = i[self.is_core[i]] #取出核心点
-            if len(i) == 0:
+            idx = q.popleft()
+            self.clustered_num += len(idx)
+            idx = idx[self.core_mask[idx]] #取出核心点
+            if len(idx) == 0:
                 continue
-            neighbor_i = np.hstack(self.neighbors_i[i])
-            neighbor_mask = np.zeros(len(self.trajs),dtype=bool)
-            neighbor_mask[neighbor_i] = True
+            neighbor = np.hstack(self.neighbors[idx])
+            neighbor = np.unique(neighbor)
+            neighbor_mask = np.zeros(self.total_num, dtype=bool)
+            neighbor_mask[neighbor] = True
+            neighbor = self.filter_split2(neighbor_mask & self.ungroup_mask)
+            if len(neighbor) == 0:
+                continue
+            #neighbor = neighbor[self.ungroup_mask[neighbor]]
+            self.labels[neighbor] = curr_label #加入组
+            self.ungroup_mask[neighbor] = False #标记为已分组
+            q.append(neighbor)
+            '''
+            neighbor_mask = np.zeros(self.total_num, dtype=bool)
+            neighbor_mask[neighbor] = True
             for id in range(self.trajs_num):
-                neighbor_idxs = self.filter_split(id,neighbor_mask)
+                neighbor_idxs = self.filter_split(id, neighbor_mask & self.ungroup_mask)
                 if len(neighbor_idxs) == 0:
                     continue
                 neighbor_idxs = np.hstack(neighbor_idxs)
                 self.labels[neighbor_idxs] = curr_label #加入组
-                self.is_ungroup[neighbor_idxs] = False 
+                self.ungroup_mask[neighbor_idxs] = False
                 q.append(neighbor_idxs) #扩散
-        
-    def cluster(self):
-        self.query_neighbors()
-        curr_label = 0
-        while True:
-            init_i = self.get_init_indices()
-            if init_i is None:
-                break
-            self.build2(init_i,curr_label)
-            curr_label += 1
-        self.labels = [self.labels[self.identifiers==i] for i in range(self.trajs_num)]
+            '''
 
+    def build_sequence(self,idx,label):
+        self.sequence[label] = ([],[])
+        s_idx = idx[0]
+        previous_labels = self.labels[max(0,s_idx-self.min_len):s_idx]
+        previous_labels = previous_labels[previous_labels!=-1]
+        if len(previous_labels) != 0:
+            previous_label = previous_labels[-1]
+            self.sequence[previous_label][1].append(label)
+
+        e_idx = idx[-1]
+        next_labels = self.labels[e_idx+1:min(self.total_num,e_idx+self.min_len+1)]
+        next_labels = next_labels[next_labels!=-1]
+        if len(next_labels) != 0:
+            next_label = next_labels[0]
+            self.sequence[next_label][0].append(label)
+
+
+
+    def cluster(self,print_progress=False):
+        if print_progress:
+            print_thread = Thread(target=self.print_progress)
+            print_thread.start()
+
+        self.culculate_neighbors()
+        curr_label = 0
+        for id in range(self.trajs_num):
+            init_idxs = self.filter_split(id, self.core_mask & self.ungroup_mask)
+            if init_idxs == []:
+                continue
+            for init_idx in init_idxs:
+                self.build_sequence(init_idx,curr_label)
+                self.build_cluster(init_idx,curr_label)
+                curr_label += 1
+
+        self.labels2 = [self.labels[self.identifiers==id] for id in range(self.trajs_num)]
+
+    def print_progress(self):
+        print("culculating neighbors...",end='\r')
+        while self.neighbors is not None:
+            pass
+        print("culculating neighbors: done.")
+        while self.labels2 is None:
+            process = self.clustered_num*100/self.total_num
+            print("clustering: %d%%" %process,end='\r')
+            time.sleep(1)
+        print("clustering: done.")
 
 
 #plt.switch_backend('TkAgg')
@@ -470,20 +484,20 @@ class DBTPSCAN:
 if __name__ == '__main__':
     from src import data
     import matplotlib.pyplot as plt
-    from matplotlib.colors import ListedColormap
+    from matplotlib.colors import LinearSegmentedColormap
 
-
-    colors = ['white', 'red', 'green', 'blue', 'yellow', 'purple', 'orange']
-    # 创建一个颜色映射表
-    cmap = ListedColormap(colors)
-
-    raw_trajs = data.load_files(r"assets/PEK-SHA", usecols=[7, 8, 5],num=50)
+    raw_trajs = data.load_files(r"assets/PEK-SHA", usecols=[7, 8, 5],num=100)
     traj_list = [data.preprocess2(raw_traj) for raw_traj in raw_trajs]
     subplot = plt.subplot()
-    cluster = DBTPSCAN(traj_list,0.028,3,8)
-    cluster.cluster()
-    color_tab = {-1:'w',0: 'r',1: 'g',2: 'b',3: 'y',4: 'c',5: 'tan',6: 'm',7: 'pink',8: 'peru',9: 'gray',10: '#8A2BE2',11: '#A52A2A',12: '#DEB887',13: '#5F9EA0',14: '#7FFF00',15: '#D2691E'}
-    for traj,label in zip(traj_list,cluster.labels):
+    cluster = DBTPSCAN(traj_list,0.028,5,10)
+    cluster.cluster(True)
+
+    colors = ['white', 'red', 'green', 'blue', 'indigo', 'orange', 'm']
+    cmap_name = 'cyclic_cmap'
+    n = len(colors)
+    cmap = LinearSegmentedColormap.from_list(cmap_name, colors, N=n)
+
+    for traj,label in zip(traj_list,cluster.labels2):
         color = [cmap(l+1) for l in label]
         subplot.scatter(traj[:,0],traj[:,1],color = color,s=4)
     plt.show()
